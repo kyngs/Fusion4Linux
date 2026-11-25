@@ -103,6 +103,9 @@ The launcher (`scripts/fusion4linux`):
 - Stops leftover background processes (Identity Manager and others) before
   and after each run, so a stale one cannot break the next sign-in
 - Loads the Vulkan layer built by `install.py`
+- Keeps Fusion's "Unsupported OS" warning from coming due. Fusion detects
+  Wine and repeats the warning periodically; the launcher resets the time it
+  was last shown (it still appears once, on the very first start)
 
 ## Uninstall
 

@@ -37,6 +37,32 @@ fi
 wineserver -k 2>/dev/null
 wineserver -w
 
+# Fusion detects Wine and periodically shows an "Unsupported OS" warning. It
+# remembers when it last did in PlatformWarningLastShownId; keep that at the
+# current time so the warning never comes due.
+for OPTIONS in "$WINEPREFIX"/drive_c/users/*/AppData/Roaming/Autodesk/"Neutron Platform"/Options/NMachineSpecificOptions.xml; do
+    [ -f "$OPTIONS" ] || continue
+    python3 - "$OPTIONS" <<'EOF'
+import re, sys, time
+
+path = sys.argv[1]
+raw = open(path, "rb").read()
+encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8"
+text = raw.decode(encoding)
+now = str(int(time.time()))
+option = re.compile(r'(<PlatformWarningLastShownId\b[^>]*\bValue=")\d*(")')
+if option.search(text):
+    text = option.sub(lambda m: m.group(1) + now + m.group(2), text)
+else:
+    group = re.search(r"<GeneralOptionGroup\b[^>]*>", text)
+    if not group:
+        sys.exit()
+    text = (text[:group.end()] + '\n        <PlatformWarningLastShownId UserName="PlatformWarningLastShownId" Value="'
+            + now + '"/>' + text[group.end():])
+open(path, "wb").write(text.encode(encoding))
+EOF
+done
+
 # Fusion starts the Identity Manager itself, but checks whether it is running
 # again before the first instance has registered (process startup is slower
 # under Wine) and starts a second one. The two block each other and sign-in
