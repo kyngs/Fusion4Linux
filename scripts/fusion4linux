@@ -13,6 +13,13 @@ export NEUTRON_CHROME_DISABLE_GPU="${NEUTRON_CHROME_DISABLE_GPU:-1}"
 # sandbox, which fails under Wine: renderers never run and every web view
 # (data panel, home tab, ...) stays blank.
 export QTWEBENGINE_DISABLE_SANDBOX=1
+# Wine copies child window renderings (the 3D canvas) to the screen without
+# waiting for the Vulkan present to finish, so hover highlights often show
+# one frame late. This layer makes presents wait (see layer/present_sync.c).
+if [ -f "$HOME_DIR/layer/present_sync.json" ]; then
+    export VK_ADD_LAYER_PATH="$HOME_DIR/layer${VK_ADD_LAYER_PATH:+:$VK_ADD_LAYER_PATH}"
+    export VK_INSTANCE_LAYERS="VK_LAYER_FUSION4LINUX_present_sync${VK_INSTANCE_LAYERS:+:$VK_INSTANCE_LAYERS}"
+fi
 
 BUILD=$(dirname "$(ls -d "$WINEPREFIX"/drive_c/users/*/AppData/Local/Autodesk/webdeploy/production/*/Fusion360.exe 2>/dev/null | head -n 1)")
 if [ ! -f "$BUILD/Fusion360.exe" ]; then
@@ -29,6 +36,26 @@ if pgrep -f 'Fusion360\.exe' >/dev/null; then
 fi
 wineserver -k 2>/dev/null
 wineserver -w
+
+# Fusion starts the Identity Manager itself, but checks whether it is running
+# again before the first instance has registered (process startup is slower
+# under Wine) and starts a second one. The two block each other and sign-in
+# fails with a misleading firewall error. Start it ourselves, the way Fusion
+# does, and wait until it is ready.
+IDLOG=$(ls -d "$WINEPREFIX"/drive_c/users/*/AppData/Local/Autodesk/"Identity Services"/Log/IdServices.log 2>/dev/null | head -n 1)
+IDLINES=0
+[ -f "$IDLOG" ] && IDLINES=$(wc -l < "$IDLOG")
+wine "$BUILD/Autodesk Identity Manager/AdskIdentityManager.exe" \
+    --process_name Autodesk.IDSDK.DefaultProcess-v2 --server_name Autodesk.IDSDK.DefaultServer-v2 &
+for _ in $(seq 60); do
+    IDLOG=$(ls -d "$WINEPREFIX"/drive_c/users/*/AppData/Local/Autodesk/"Identity Services"/Log/IdServices.log 2>/dev/null | head -n 1)
+    # The log may have been rotated since it was counted
+    [ -f "$IDLOG" ] && [ "$(wc -l < "$IDLOG")" -lt "$IDLINES" ] && IDLINES=0
+    if [ -f "$IDLOG" ] && tail -n +$((IDLINES + 1)) "$IDLOG" | grep -q "App state set to Running"; then
+        break
+    fi
+    sleep 0.5
+done
 
 cd "$BUILD" || exit 1
 wine Fusion360.exe "$@"

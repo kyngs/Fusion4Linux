@@ -1,0 +1,15 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_FUSION4LINUX_present_sync",
+        "type": "GLOBAL",
+        "library_path": "./libpresent_sync.so",
+        "api_version": "1.4.363",
+        "implementation_version": "1",
+        "description": "Waits for presents to complete so Wine's offscreen child window copy sees the new frame",
+        "functions": {
+            "vkGetInstanceProcAddr": "vkGetInstanceProcAddr",
+            "vkGetDeviceProcAddr": "vkGetDeviceProcAddr"
+        }
+    }
+}

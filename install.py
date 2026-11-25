@@ -10,6 +10,7 @@ installer's post-deploy tasks that Fusion depends on. The installed launcher
 import argparse
 import concurrent.futures
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -28,10 +29,14 @@ LOC_BUILD = "39e8a3d5e919c70b05ef3ebfe9c6bfc8d9ee001e"
 LOC_LAUNCHER = "6a0c9611291d45bb9226980209917c3d"
 LOC_COMMON = "82533bdd63a14d64a6cd0b10485c044c"
 
-# Fusion ships the Microsoft VC++ runtime next to its binaries. Wine's builtin
-# replacements are incomplete (e.g. no std::get_new_handler) and crash the
-# cloud browser, so prefer the shipped copies.
+# Fusion ships these Microsoft DLLs next to its binaries. Wine's builtin
+# replacements are incomplete, so prefer the shipped copies:
+# - VC++ runtime: no std::get_new_handler, crashes the cloud browser
+# - HLSL compiler: fails on the canvas shaders, so designs do not render
+#   with DirectX 11 (only edges and the ViewCube appear)
 NATIVE_DLLS = [
+    "d3dcompiler_43",
+    "d3dcompiler_47",
     "concrt140",
     "msvcp140",
     "msvcp140_1",
@@ -43,6 +48,10 @@ NATIVE_DLLS = [
     "vcruntime140_1",
 ]
 
+# DXVK renders the 3D canvas; Wine's own Direct3D (wined3d) does not draw designs
+DXVK_VERSION = "3.0.1"
+DXVK_URL = f"https://github.com/doitsujin/dxvk/releases/download/v{DXVK_VERSION}/dxvk-{DXVK_VERSION}.tar.gz"
+DXVK_SHA256 = "bebb6284db590535b7b005c102ebf6850c98842cff0fded9aacb74babae14c49"
 DXVK_DLLS = ["d3d8", "d3d9", "d3d10core", "d3d11", "dxgi"]
 
 URI_SCHEMES = ["adskidmgr", "adsk.idmgr"]
@@ -197,6 +206,27 @@ def set_dll_overrides(prefix, dlls, mode):
         )
 
 
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_dxvk(dest):
+    """Download the pinned DXVK release (cached) and extract it into dest."""
+    archive = os.path.join(cache_home(), "fusion4linux", f"dxvk-{DXVK_VERSION}.tar.gz")
+    if not os.path.exists(archive) or sha256(archive) != DXVK_SHA256:
+        print(f"Downloading DXVK {DXVK_VERSION}")
+        subprocess.run(["curl", "-fL", "--retry", "3", "-o", archive, DXVK_URL], check=True)
+        if sha256(archive) != DXVK_SHA256:
+            os.remove(archive)
+            sys.exit("DXVK download does not match the expected checksum")
+    subprocess.run(["tar", "-xzf", archive, "-C", dest], check=True)
+    return os.path.join(dest, f"dxvk-{DXVK_VERSION}")
+
+
 def install_dxvk(prefix, dxvk_dir):
     """Copy an extracted DXVK release into the prefix (replacing wined3d)."""
     system = os.path.join(prefix, "drive_c", "windows")
@@ -214,6 +244,26 @@ def install_webview2(prefix, build_dir):
         ["wine", os.path.join(build_dir, "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"), "/silent", "/install"],
         env=wine_env(prefix), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+
+
+def build_layer(home):
+    """Build the Vulkan layer that fixes the canvas showing stale frames (layer/present_sync.c)."""
+    dest = os.path.join(home, "layer")
+    os.makedirs(dest, exist_ok=True)
+    print("Building present sync layer")
+    result = subprocess.run(
+        ["gcc", "-std=c11", "-D_GNU_SOURCE", "-O2", "-fPIC", "-shared", "-fvisibility=hidden",
+         "-o", os.path.join(dest, "libpresent_sync.so"), os.path.join(REPO, "layer", "present_sync.c"),
+         "-lpthread", "-lxcb", "-lxcb-damage"],
+        stderr=subprocess.PIPE, text=True,
+    )
+    if result.returncode != 0:
+        # Without the layer the launcher still works, the canvas just lags behind sometimes
+        shutil.rmtree(dest, ignore_errors=True)
+        print("warning: could not build the present sync layer (needs gcc and the Vulkan and XCB development "
+              "headers); hover highlights in the 3D canvas may lag one frame behind\n" + result.stderr.strip())
+        return
+    shutil.copy(os.path.join(REPO, "layer", "present_sync.json"), dest)
 
 
 def install_scripts(home):
@@ -276,9 +326,10 @@ def main():
     ap.add_argument("--home", default=os.path.join(data_home(), "fusion4linux"),
                     help="installation directory (default: %(default)s)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
-    ap.add_argument("--dxvk", help="extracted DXVK release directory (containing x64/ and x32/). "
-                    "Currently breaks the embedded browsers: the launcher disables their GPU use, "
-                    "and DXVK cannot create the WARP software device they then fall back to")
+    ap.add_argument("--dxvk", help="use this extracted DXVK release directory (containing x64/ and x32/) "
+                    "instead of downloading DXVK")
+    ap.add_argument("--no-dxvk", action="store_true",
+                    help="use Wine's own Direct3D instead of DXVK (designs do not render in the canvas)")
     ap.add_argument("--no-desktop", action="store_true", help="skip the menu entry and sign-in URL handler")
     args = ap.parse_args()
 
@@ -302,14 +353,16 @@ def main():
     configure(build_dir)
 
     set_dll_overrides(prefix, NATIVE_DLLS, "native,builtin")
-    if args.dxvk:
-        install_dxvk(prefix, args.dxvk)
-        set_dll_overrides(prefix, DXVK_DLLS, "native,builtin")
-    else:
+    if args.no_dxvk:
         set_dll_overrides(prefix, DXVK_DLLS, "builtin")
+    else:
+        with tempfile.TemporaryDirectory(dir=os.path.join(cache_home(), "fusion4linux")) as tmp:
+            install_dxvk(prefix, args.dxvk or download_dxvk(tmp))
+        set_dll_overrides(prefix, DXVK_DLLS, "native,builtin")
 
     install_webview2(prefix, build_dir)
 
+    build_layer(home)
     bindir = install_scripts(home)
     if not args.no_desktop:
         install_desktop_entries(bindir, install_icon(build_dir, home))

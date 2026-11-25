@@ -11,13 +11,20 @@ installed launcher applies the runtime workarounds Fusion needs under Wine.
 
 Tested with Fusion 2706.1.17 on Wine 11.21 (NVIDIA RTX 5080).
 
-- Works: installation, sign-in, data panel and other embedded web views
-- Broken: designs do not render in the 3D canvas
+- Works: installation, sign-in, data panel and other embedded web views,
+  rendering designs in the 3D canvas (with DXVK and the "DirectX 11" or
+  "Auto-select" graphics driver)
+- Not tested yet: AMD and Intel GPUs, Wine's Wayland driver (with Wine 11.21
+  the canvas goes blank there)
 
 ## Requirements
 
-- Wine (64-bit, with WoW64)
+- Wine (64-bit, with WoW64), running on X11 or XWayland
+- A Vulkan capable GPU and driver (for DXVK)
 - `7z` (p7zip / 7-Zip), `tar`, `xz`, `curl`, Python 3
+- `gcc` and the Vulkan and XCB development headers (`vulkan-headers`,
+  `libxcb`), to build the layer that keeps the 3D canvas up to date. Without
+  them Fusion still works, but hover highlights may lag one frame behind
 - Optional: ImageMagick (`magick`) for the menu icon
 
 ## Install
@@ -26,7 +33,7 @@ Tested with Fusion 2706.1.17 on Wine 11.21 (NVIDIA RTX 5080).
 ./install.py
 ```
 
-This downloads the Fusion admin installer (about 1.5 GB) to
+This downloads the Fusion admin installer (about 1.5 GB) and DXVK to
 `~/.cache/fusion4linux/` and installs Fusion (about 7.5 GB) to
 `~/.local/share/fusion4linux/`. It also adds an "Autodesk Fusion" menu entry
 and registers the URL handler that completes browser sign-in.
@@ -35,6 +42,8 @@ Options:
 
 - `--installer PATH` use an already downloaded `Fusion Admin Install.exe`
 - `--home DIR` install somewhere else
+- `--dxvk DIR` use an already extracted DXVK release instead of downloading it
+- `--no-dxvk` use Wine's own Direct3D (designs do not render in the canvas)
 - `--no-desktop` skip the menu entry and sign-in URL handler
 
 Run `install.py` again to update: it only downloads the installer if Autodesk
@@ -69,9 +78,18 @@ link, choose "Autodesk Identity Manager (Fusion4Linux)".
   `%LOCALAPPDATA%\Autodesk\webdeploy\production\`
 - Activates the production configuration (the installer ships a staging one
   and rewrites it during installation)
-- Prefers the Microsoft VC++ runtime shipped with Fusion over Wine's builtin
-  one, which lacks functions Fusion uses
+- Prefers the Microsoft VC++ runtime and HLSL shader compiler shipped with
+  Fusion over Wine's builtin ones. Wine's runtime lacks functions Fusion uses,
+  and its shader compiler fails on the canvas shaders, so designs would not
+  render
+- Installs DXVK, which renders the 3D canvas through Vulkan
 - Installs the bundled WebView2 runtime, needed by the sign-in component
+- Builds a small Vulkan layer (`layer/present_sync.c`). Wine draws child
+  windows such as the 3D canvas offscreen and copies them to the screen right
+  after each present, before the new frame has actually arrived, so the canvas
+  often shows the previous frame (hover highlights lag one step behind). The
+  layer waits until the X server reports the window changed before letting
+  Wine copy it
 
 The launcher (`scripts/fusion4linux`):
 
@@ -79,8 +97,12 @@ The launcher (`scripts/fusion4linux`):
   renderer processes otherwise never start and every panel stays blank
 - Disables GPU use in the embedded web views. It relies on Direct3D textures
   shared between processes, which Wine does not fully implement
+- Starts the Identity Manager before Fusion and waits until it is ready.
+  Otherwise Fusion can start two of them, which then block each other and
+  sign-in fails with a misleading firewall error
 - Stops leftover background processes (Identity Manager and others) before
   and after each run, so a stale one cannot break the next sign-in
+- Loads the Vulkan layer built by `install.py`
 
 ## Uninstall
 
