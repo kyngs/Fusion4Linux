@@ -1,0 +1,39 @@
+#!/bin/sh
+# Launch Autodesk Fusion from the prefix created by install.py
+HOME_DIR=$(cd "$(dirname "$0")/.." && pwd)
+export WINEPREFIX="${WINEPREFIX:-$HOME_DIR/prefix}"
+export WINEDEBUG="${WINEDEBUG:--all}"
+
+# Fusion builds QTWEBENGINE_CHROMIUM_FLAGS itself; this switch makes it add
+# --disable-gpu. GPU compositing in the embedded browsers needs D3D11 textures
+# shared by NT handle between Chromium and Qt, which Wine's d3dkmt only
+# semi-stubs: web views render blank (wined3d) or crash the app (DXVK).
+export NEUTRON_CHROME_DISABLE_GPU="${NEUTRON_CHROME_DISABLE_GPU:-1}"
+# Chromium starts renderers suspended and resumes them after applying the
+# sandbox, which fails under Wine: renderers never run and every web view
+# (data panel, home tab, ...) stays blank.
+export QTWEBENGINE_DISABLE_SANDBOX=1
+
+BUILD=$(dirname "$(ls -d "$WINEPREFIX"/drive_c/users/*/AppData/Local/Autodesk/webdeploy/production/*/Fusion360.exe 2>/dev/null | head -n 1)")
+if [ ! -f "$BUILD/Fusion360.exe" ]; then
+    echo "Fusion is not installed in $WINEPREFIX; run install.py first" >&2
+    exit 1
+fi
+
+# Background helpers (Identity Manager, adexmtsv, node) outlive Fusion under
+# Wine. A stale Identity Manager keeps pending logins for dead Fusion processes
+# and breaks the next sign-in, so start from a clean wineserver unless Fusion is
+# already running (in which case just hand the arguments to it).
+if pgrep -f 'Fusion360\.exe' >/dev/null; then
+    cd "$BUILD" && exec wine Fusion360.exe "$@"
+fi
+wineserver -k 2>/dev/null
+wineserver -w
+
+cd "$BUILD" || exit 1
+wine Fusion360.exe "$@"
+status=$?
+
+# Fusion has exited: stop the helpers it left behind
+wineserver -k 2>/dev/null
+exit $status

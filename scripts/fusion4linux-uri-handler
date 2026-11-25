@@ -1,0 +1,8 @@
+#!/bin/sh
+# Forward an Autodesk sign-in callback URL (adskidmgr://, adsk.idmgr://) from the
+# Linux browser to the Identity Manager running inside the Wine prefix
+HOME_DIR=$(cd "$(dirname "$0")/.." && pwd)
+export WINEPREFIX="${WINEPREFIX:-$HOME_DIR/prefix}"
+export WINEDEBUG="${WINEDEBUG:--all}"
+IDMGR=$(ls -d "$WINEPREFIX"/drive_c/users/*/AppData/Local/Autodesk/webdeploy/production/*/"Autodesk Identity Manager"/AdskIdentityManager.exe 2>/dev/null | head -n 1)
+exec wine "$IDMGR" "$1"
